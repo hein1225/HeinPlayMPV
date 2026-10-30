@@ -52,6 +52,11 @@ apply() { # apply <资产名> <目标目录>
   echo "    → $dst"
 }
 
+# Android 用 0.41.0 头（与 libmpv.so 同源）；Windows/Linux 用 master 头
+if have mpv-headers-android.tar.gz; then
+  fetch mpv-headers-android.tar.gz
+  apply mpv-headers-android.tar.gz "$DEST/hain_tv/third_party"
+fi
 if have mpv-headers.tar.gz; then
   fetch mpv-headers.tar.gz
   apply mpv-headers.tar.gz "$DEST/hain_tv/third_party"

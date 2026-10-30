@@ -16,7 +16,8 @@ tag 命名：`mpv-v<HeinPlay 版本>`。HeinPlay 换版本时，**先在本仓�
 
 | 资产 | 落地到 HeinPlay 的位置 | 谁用 |
 |---|---|---|
-| `mpv-headers.tar.gz` | `hain_tv/third_party/include/mpv/` | Android（`-DMPV_INCLUDE_DIR`）、Windows 桌面壳 |
+| `mpv-headers-android.tar.gz` | `hain_tv/third_party/include/mpv/` | **Android 主工程 / tvLegacy**（mpv **0.41.0** 头，必须与 `libmpv.so` 同源） |
+| `mpv-headers.tar.gz` | `hain_tv/third_party/include/mpv/` | Windows / Linux 桌面壳（mpv master 头） |
 | `android-arm64-v8a.tar.gz` | `hain_tv/android/app/src/main/jniLibs/arm64-v8a/` | Android 主工程 APK |
 | `android-armeabi-v7a.tar.gz` | `hain_tv/android/app/src/main/jniLibs/armeabi-v7a/` | Android 主工程 APK |
 | `android-tvlegacy-arm64-v8a.tar.gz` | `hain_tv_legacy/android/app/src/main/jniLibs/arm64-v8a/` | tvLegacy APK |
@@ -31,8 +32,9 @@ tag 命名：`mpv-v<HeinPlay 版本>`。HeinPlay 换版本时，**先在本仓�
 ```bash
 TAG=mpv-v1.4.1
 BASE=https://github.com/hein1225/HeinPlayMPV/releases/download/$TAG
-curl -fsSL -o mpv-headers.tar.gz "$BASE/mpv-headers.tar.gz"
-tar -xzf mpv-headers.tar.gz -C hain_tv/third_party/   # → third_party/include/mpv/*
+# Android 用 0.41.0 头（与 libmpv.so 同源）；Windows/Linux 用 master 头
+curl -fsSL -o mpv-headers-android.tar.gz "$BASE/mpv-headers-android.tar.gz"
+tar -xzf mpv-headers-android.tar.gz -C hain_tv/third_party/   # → third_party/include/mpv/*
 ```
 
 或直接用本仓库提供的封装：

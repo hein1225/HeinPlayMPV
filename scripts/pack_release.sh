@@ -22,9 +22,18 @@ STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 
 # 1) 头文件
-rm -rf "$STAGE/inc"; mkdir -p "$STAGE/inc/include"
-cp -L "$ROOT/prebuilt/include/mpv/"*.h "$STAGE/inc/include/"
+#    mpv-headers.tar.gz          —— master 头（Windows / Linux 桌面壳用）
+#    mpv-headers-android.tar.gz  —— mpv 0.41.0 头（**必须**与 Android 的 libmpv.so 同源）
+#    包内结构统一为 include/mpv/*.h，解到 third_party/ 后即 third_party/include/mpv/...
+rm -rf "$STAGE/inc"; mkdir -p "$STAGE/inc/include/mpv"
+cp -L "$ROOT/prebuilt/include/mpv/"*.h "$STAGE/inc/include/mpv/"
 tar -czf "$OUT/mpv-headers.tar.gz" -C "$STAGE/inc" include
+
+if [ -d "$ROOT/sources/mpv-0.41.0/include/mpv" ]; then
+  rm -rf "$STAGE/inca"; mkdir -p "$STAGE/inca/include/mpv"
+  cp -L "$ROOT/sources/mpv-0.41.0/include/mpv/"*.h "$STAGE/inca/include/mpv/"
+  tar -czf "$OUT/mpv-headers-android.tar.gz" -C "$STAGE/inca" include
+fi
 
 # 2) Android 主工程 ABI
 for ABI in arm64-v8a armeabi-v7a; do
