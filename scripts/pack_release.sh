@@ -63,13 +63,22 @@ else
 fi
 
 # 5) Linux
+#    包内结构直接对应工程的 third_party 布局：
+#      mpv-linux/libmpv.so.2        ← 桌面 mpv 壳的依赖收集脚本按此路径找
+#      mpv-linux/include/mpv/*.h    ← 头文件
+#      mpv-linux/mpv.pc             ← pkg-config（CI 用 PKG_CONFIG_PATH 指到解包目录）
+#      ffmpeg-mini/lib/*.so*        ← libmpv 依赖的**精简** ffmpeg（缺它 ldd 闭包不完整）
 if [ -d "$ROOT/prebuilt/linux/x86_64" ]; then
-  rm -rf "$STAGE/l"; mkdir -p "$STAGE/l/mpv-linux/lib" "$STAGE/l/mpv-linux/include/mpv"
-  cp -L "$ROOT/prebuilt/linux/x86_64/libmpv.so.2" "$STAGE/l/mpv-linux/lib/"
+  rm -rf "$STAGE/l"; mkdir -p "$STAGE/l/mpv-linux/include/mpv"
+  cp -L "$ROOT/prebuilt/linux/x86_64/libmpv.so.2" "$STAGE/l/mpv-linux/"
   cp -L "$ROOT/prebuilt/include/mpv/"*.h "$STAGE/l/mpv-linux/include/mpv/"
   [ -f "$ROOT/prebuilt/linux/LICENSE.LGPL" ] && cp -L "$ROOT/prebuilt/linux/LICENSE.LGPL" "$STAGE/l/mpv-linux/"
-  sed "s|@PREFIX@|/opt/heinplay-mpv|" "$ROOT/linux/mpv.pc.in" > "$STAGE/l/mpv-linux/mpv.pc" 2>/dev/null || true
-  tar -czf "$OUT/linux-mpv-x86_64.tar.gz" -C "$STAGE/l" mpv-linux
+  sed "s|@PREFIX@|@PREFIX@|" "$ROOT/linux/mpv.pc.in" > "$STAGE/l/mpv-linux/mpv.pc" 2>/dev/null || true
+  if [ -d "$ROOT/prebuilt/ffmpeg-mini/lib" ]; then
+    mkdir -p "$STAGE/l/ffmpeg-mini/lib"
+    cp -L "$ROOT/prebuilt/ffmpeg-mini/lib/"*.so* "$STAGE/l/ffmpeg-mini/lib/"
+  fi
+  tar -czf "$OUT/linux-mpv-x86_64.tar.gz" -C "$STAGE/l" mpv-linux ffmpeg-mini
 fi
 
 # 6) 鸿蒙
