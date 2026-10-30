@@ -28,3 +28,7 @@ build/android/mpv-android-tools/
 
 # 参考工程：上游工程的 clone（含嵌套 .git），不入库
 build/ohos/reference/
+
+# Windows 官方 libmpv：libmpv-2.dll 达 118MB，超过 GitHub 单文件 100MB 上限，
+# 只能以 Release 资产形式分发（scripts/pack_release.sh 会打包它）。
+prebuilt/windows/
