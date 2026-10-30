@@ -1,0 +1,432 @@
+diff --git a/audio/out/ao_opensles.c b/audio/out/ao_opensles.c
+index 6d4b6a7..f2a1f43 100644
+--- a/audio/out/ao_opensles.c
++++ b/audio/out/ao_opensles.c
+@@ -27,11 +27,11 @@
+ #include "osdep/timer.h"
+ 
+ #include <SLES/OpenSLES.h>
+-#include <SLES/OpenSLES_Android.h>
++#include <SLES/OpenSLES_OpenHarmony.h>
+ 
+ struct priv {
+     SLObjectItf sl, output_mix, player;
+-    SLBufferQueueItf buffer_queue;
++    SLOHBufferQueueItf oh_buffer_queue;
+     SLEngineItf engine;
+     SLPlayItf play;
+     void *buf;
+@@ -41,6 +41,7 @@ struct priv {
+ 
+     int frames_per_enqueue;
+     int buffer_size_in_ms;
++    atomic_bool shutdown; 
+ };
+ 
+ #define DESTROY(thing) \
+@@ -52,41 +53,92 @@ struct priv {
+ static void uninit(struct ao *ao)
+ {
+     struct priv *p = ao->priv;
++    if (!p) return;
+ 
++    atomic_store(&p->shutdown, true);
++
++    if (p->play) {
++        (*p->play)->SetPlayState(p->play, SL_PLAYSTATE_STOPPED);
++    }
++
++    if (p->oh_buffer_queue) {
++        (*p->oh_buffer_queue)->RegisterCallback(p->oh_buffer_queue, NULL, NULL);
++        (*p->oh_buffer_queue)->Clear(p->oh_buffer_queue);
++    }
++
++    mp_mutex_lock(&p->buffer_lock);
+     DESTROY(player);
+     DESTROY(output_mix);
+     DESTROY(sl);
+ 
+-    p->buffer_queue = NULL;
++    p->oh_buffer_queue = NULL;
+     p->engine = NULL;
+     p->play = NULL;
+ 
++    mp_mutex_unlock(&p->buffer_lock);
+     mp_mutex_destroy(&p->buffer_lock);
+-
+-    free(p->buf);
+-    p->buf = NULL;
+ }
+ 
+ #undef DESTROY
+ 
+-static void buffer_callback(SLBufferQueueItf buffer_queue, void *context)
++static void oh_buffer_callback(SLOHBufferQueueItf caller, void *context)
+ {
+     struct ao *ao = context;
++    if (!ao || !ao->priv) {
++        return;
++    }
++
+     struct priv *p = ao->priv;
+-    SLresult res;
+-    double delay;
++    if (atomic_load(&p->shutdown)) {
++        return;
++    }
+ 
+     mp_mutex_lock(&p->buffer_lock);
++    
++    if (atomic_load(&p->shutdown) || !p->oh_buffer_queue) {
++        mp_mutex_unlock(&p->buffer_lock);
++        return;
++    }
+ 
+-    delay = p->frames_per_enqueue / (double)ao->samplerate;
+-    delay += p->audio_latency;
+-    ao_read_data(ao, &p->buf, p->frames_per_enqueue,
+-        mp_time_ns() + MP_TIME_S_TO_NS(delay), NULL, true, true);
+-
+-    res = (*buffer_queue)->Enqueue(buffer_queue, p->buf, p->bytes_per_enqueue);
+-    if (res != SL_RESULT_SUCCESS)
+-        MP_ERR(ao, "Failed to Enqueue: %d\n", res);
++    SLresult res;
++    SLuint8 *buffer = NULL;
++    SLuint32 buffer_size = 0;
++    
++    res = (*p->oh_buffer_queue)->GetBuffer(p->oh_buffer_queue, &buffer, &buffer_size);
++    if (res != SL_RESULT_SUCCESS || !buffer) {
++        MP_ERR(ao, "Failed to get buffer\n");
++        mp_mutex_unlock(&p->buffer_lock);
++        return;
++    }
++    
++    int samples = buffer_size / (ao->channels.num * af_fmt_to_bytes(ao->format));
++
++    if (buffer_size != p->bytes_per_enqueue) {
++        MP_INFO(ao, "Buffer size changed from %d to %d, updating enqueue parameters\n",
++                p->bytes_per_enqueue, buffer_size);
++        p->bytes_per_enqueue = buffer_size;
++        p->frames_per_enqueue = samples;
++    }
++    
++    void *data[1] = { buffer };
++    bool eof = false;
++    
++    int read_samples = ao_read_data(ao, data, samples,
++                                     0,      // out_time_ns
++                                     &eof,   // eof
++                                     true,   // pad_silence
++                                     false); // blocking
++    
++    if (read_samples < samples) {
++        int bytes_read = read_samples * ao->channels.num * af_fmt_to_bytes(ao->format);
++        memset(buffer + bytes_read, 0, buffer_size - bytes_read);
++    }
+ 
++    res = (*p->oh_buffer_queue)->Enqueue(p->oh_buffer_queue, buffer, buffer_size);
++    if (res != SL_RESULT_SUCCESS) {
++        MP_ERR(ao, "Failed to enqueue buffer: %d\n", res);
++    }
++    
+     mp_mutex_unlock(&p->buffer_lock);
+ }
+ 
+@@ -102,9 +154,10 @@ static void buffer_callback(SLBufferQueueItf buffer_queue, void *context)
+ static int init(struct ao *ao)
+ {
+     struct priv *p = ao->priv;
++    p->shutdown = false;
+     SLDataLocator_BufferQueue locator_buffer_queue;
+     SLDataLocator_OutputMix locator_output_mix;
+-    SLAndroidDataFormat_PCM_EX pcm;
++    SLDataFormat_PCM pcm;
+     SLDataSource audio_source;
+     SLDataSink audio_sink;
+ 
+@@ -123,31 +176,28 @@ static int init(struct ao *ao)
+     locator_buffer_queue.numBuffers = 8;
+ 
+     if (af_fmt_is_int(ao->format)) {
+-        // Be future-proof
+         if (af_fmt_to_bytes(ao->format) > 2)
+             ao->format = AF_FORMAT_S32;
+         else
+             ao->format = af_fmt_from_planar(ao->format);
+-        pcm.formatType = SL_DATAFORMAT_PCM;
+     } else {
+-        ao->format = AF_FORMAT_FLOAT;
+-        pcm.formatType = SL_ANDROID_DATAFORMAT_PCM_EX;
+-        pcm.representation = SL_ANDROID_PCM_REPRESENTATION_FLOAT;
++        MP_WARN(ao, "Float format may not be supported, using S32\n");
++        ao->format = AF_FORMAT_S32;
+     }
++
++    pcm.formatType = SL_DATAFORMAT_PCM;
+     pcm.numChannels = ao->channels.num;
+-    pcm.containerSize = pcm.bitsPerSample = 8 * af_fmt_to_bytes(ao->format);
++    pcm.samplesPerSec = ao->samplerate * 1000;
++    pcm.bitsPerSample = 8 * af_fmt_to_bytes(ao->format);
++    pcm.containerSize = pcm.bitsPerSample;
+     pcm.channelMask = SL_SPEAKER_FRONT_LEFT | SL_SPEAKER_FRONT_RIGHT;
+     pcm.endianness = SL_BYTEORDER_LITTLEENDIAN;
+-    pcm.sampleRate = ao->samplerate * 1000;
+ 
+     if (p->buffer_size_in_ms) {
+         ao->device_buffer = ao->samplerate * p->buffer_size_in_ms / 1000;
+-        // As the purpose of buffer_size_in_ms is to request a specific
+-        // soft buffer size:
+         ao->def_buffer = 0;
+     }
+ 
+-    // But it does not make sense if it is smaller than the enqueue size:
+     if (p->frames_per_enqueue) {
+         ao->device_buffer = MPMAX(ao->device_buffer, p->frames_per_enqueue);
+     } else {
+@@ -163,11 +213,6 @@ static int init(struct ao *ao)
+ 
+     p->bytes_per_enqueue = p->frames_per_enqueue * ao->channels.num *
+         af_fmt_to_bytes(ao->format);
+-    p->buf = calloc(1, p->bytes_per_enqueue);
+-    if (!p->buf) {
+-        MP_ERR(ao, "Failed to allocate device buffer\n");
+-        goto error;
+-    }
+ 
+     int r = mp_mutex_init(&p->buffer_lock);
+     if (r) {
+@@ -184,41 +229,19 @@ static int init(struct ao *ao)
+     audio_sink.pLocator = (void*)&locator_output_mix;
+     audio_sink.pFormat = NULL;
+ 
+-    SLInterfaceID iid_array[] = { SL_IID_BUFFERQUEUE, SL_IID_ANDROIDCONFIGURATION };
+-    SLboolean required[] = { SL_BOOLEAN_TRUE, SL_BOOLEAN_FALSE };
++    SLInterfaceID iid_array[] = { SL_IID_OH_BUFFERQUEUE };
++    SLboolean required[] = { SL_BOOLEAN_TRUE };
+     CHK((*p->engine)->CreateAudioPlayer(p->engine, &p->player, &audio_source,
+-        &audio_sink, 2, iid_array, required));
+-
++        &audio_sink, 1, iid_array, required));
+     CHK((*p->player)->Realize(p->player, SL_BOOLEAN_FALSE));
+     CHK((*p->player)->GetInterface(p->player, SL_IID_PLAY, (void*)&p->play));
+-    CHK((*p->player)->GetInterface(p->player, SL_IID_BUFFERQUEUE,
+-        (void*)&p->buffer_queue));
+-    CHK((*p->buffer_queue)->RegisterCallback(p->buffer_queue,
+-        buffer_callback, ao));
++    CHK((*p->player)->GetInterface(p->player, SL_IID_OH_BUFFERQUEUE,
++        (void*)&p->oh_buffer_queue));
++    CHK((*p->oh_buffer_queue)->RegisterCallback(p->oh_buffer_queue,
++        oh_buffer_callback, ao));
+     CHK((*p->play)->SetPlayState(p->play, SL_PLAYSTATE_PLAYING));
+-
+-    SLAndroidConfigurationItf android_config;
+-    SLuint32 audio_latency = 0, value_size = sizeof(SLuint32);
+-
+-    SLint32 get_interface_result = (*p->player)->GetInterface(
+-        p->player,
+-        SL_IID_ANDROIDCONFIGURATION,
+-        &android_config
+-    );
+-
+-    if (get_interface_result == SL_RESULT_SUCCESS) {
+-        SLint32 get_configuration_result = (*android_config)->GetConfiguration(
+-            android_config,
+-            (const SLchar *)"androidGetAudioLatency",
+-            &value_size,
+-            &audio_latency
+-        );
+-
+-        if (get_configuration_result == SL_RESULT_SUCCESS) {
+-            p->audio_latency = (double)audio_latency / 1000.0;
+-            MP_INFO(ao, "Device latency is %f\n", p->audio_latency);
+-        }
+-    }
++    p->audio_latency = (double)p->frames_per_enqueue / ao->samplerate;
++    MP_INFO(ao, "Estimated latency is %f ms\n", p->audio_latency * 1000);
+ 
+     return 1;
+ error:
+@@ -230,14 +253,27 @@ error:
+ 
+ static void reset(struct ao *ao)
+ {
++    if (!ao || !ao->priv) {
++        return;
++    }
+     struct priv *p = ao->priv;
+-    (*p->buffer_queue)->Clear(p->buffer_queue);
++
++    mp_mutex_lock(&p->buffer_lock);
++    if (p->oh_buffer_queue) {
++        (*p->oh_buffer_queue)->Clear(p->oh_buffer_queue);
++    }
++    mp_mutex_unlock(&p->buffer_lock);
+ }
+ 
+ static void resume(struct ao *ao)
+ {
++    if (!ao || !ao->priv) {
++        return;
++    }
+     struct priv *p = ao->priv;
+-    buffer_callback(p->buffer_queue, ao);
++    if (p->oh_buffer_queue) {
++        oh_buffer_callback(p->oh_buffer_queue, ao);
++    }
+ }
+ 
+ #define OPT_BASE_STRUCT struct priv
+@@ -262,4 +298,4 @@ const struct ao_driver audio_out_opensles = {
+         {0}
+     },
+     .options_prefix = "opensles",
+-};
++};
+\ No newline at end of file
+diff --git a/meson.build b/meson.build
+index 8fed718..8130824 100644
+--- a/meson.build
++++ b/meson.build
+@@ -498,6 +498,16 @@ if features['android']
+                      'video/out/vo_mediacodec_embed.c')
+ endif
+ 
++features += {'openharmony': host_machine.system() == 'openharmony'}
++if features['openharmony']
++        dependencies += [
++        cc.find_library('native_window'),
++        cc.find_library('EGL'),
++        cc.find_library('GLESv2')
++    ]
++    sources += files('video/out/openharmony_common.c')
++endif
++
+ uwp_opt = get_option('uwp').require(
+     not get_option('cplayer'),
+     error_message: 'cplayer is not false!',
+@@ -1276,6 +1286,18 @@ if features['egl-android']
+     sources += files('video/out/opengl/context_android.c')
+ endif
+ 
++egl_openharmony_opt = get_option('egl-openharmony').require(
++    features['openharmony'] and gl_allowed,
++    error_message: 'the OS is not openharmony or GL is not allowed!',
++)
++egl_openharmony = cc.find_library('EGL', required: egl_openharmony_opt)
++features += {'egl-openharmony': egl_openharmony.found()}
++if features['egl-openharmony']
++    dependencies += egl_openharmony
++    features += {'gl': true}
++    sources += files('video/out/opengl/context_openharmony.c')
++endif
++
+ egl_drm = get_option('egl-drm').require(
+     features['drm'] and features['egl'] and features['gbm'] and gl_allowed,
+     error_message: 'either drm, egl, or gbm could not be found!',
+@@ -1316,7 +1338,7 @@ if plain_gl.allowed()
+     features += {'gl': true}
+ endif
+ 
+-if features['egl'] or features['egl-android'] or features['egl-angle-win32']
++if features['egl'] or features['egl-android'] or features['egl-openharmony'] or features['egl-angle-win32']
+     sources += files('video/out/opengl/egl_helpers.c')
+ endif
+ 
+diff --git a/meson.options b/meson.options
+index 416ee3b..e1c11bd 100644
+--- a/meson.options
++++ b/meson.options
+@@ -68,6 +68,7 @@ option('dmabuf-wayland', type: 'feature', value: 'auto', description: 'dmabuf-wa
+ option('drm', type: 'feature', value: 'auto', description: 'Direct Rendering Manager (DRM)')
+ option('egl', type: 'feature', value: 'auto', description: 'EGL 1.4')
+ option('egl-android', type: 'feature', value: 'auto', description: 'Android EGL support')
++option('egl-openharmony', type: 'feature', value: 'auto', description: 'OpenHarmony EGL support')
+ option('egl-angle', type: 'feature', value: 'auto', description: 'OpenGL ANGLE headers')
+ option('egl-angle-lib', type: 'feature', value: 'auto', description: 'OpenGL Win32 ANGLE library')
+ option('egl-angle-win32', type: 'feature', value: 'auto', description: 'OpenGL Win32 ANGLE backend')
+diff --git a/options/options.c b/options/options.c
+index e8b590a..f8a78fb 100644
+--- a/options/options.c
++++ b/options/options.c
+@@ -252,6 +252,9 @@ static const m_option_t mp_vo_opt_list[] = {
+ #if HAVE_EGL_ANDROID
+     {"android-surface-size", OPT_SIZE_BOX(android_surface_size)},
+ #endif
++#if HAVE_EGL_OPENHARMONY
++    {"openharmony-surface-size", OPT_SIZE_BOX(openharmony_surface_size)},
++#endif
+ #if HAVE_D3D11
+     {"d3d11-composition-size", OPT_SIZE_BOX(d3d11_composition_size)},
+ #endif
+@@ -954,7 +957,7 @@ static const m_option_t mp_opts[] = {
+     {"", OPT_SUBSTRUCT(opengl_opts, opengl_conf)},
+ #endif
+ 
+-#if HAVE_EGL || HAVE_EGL_ANDROID || HAVE_EGL_ANGLE_WIN32
++#if HAVE_EGL || HAVE_EGL_ANDROID || HAVE_EGL_OPENHARMONY || HHAVE_EGL_ANGLE_WIN32
+     {"egl", OPT_SUBSTRUCT(egl_opts, egl_conf)},
+ #endif
+ 
+diff --git a/options/options.h b/options/options.h
+index 26a7913..5445e54 100644
+--- a/options/options.h
++++ b/options/options.h
+@@ -89,6 +89,8 @@ typedef struct mp_vo_opts {
+ 
+     struct m_geometry d3d11_composition_size;
+ 
++    struct m_geometry openharmony_surface_size;
++
+     int swapchain_depth;  // max number of images to render ahead
+ 
+     struct m_geometry video_crop;
+diff --git a/player/command.c b/player/command.c
+index da61e1c..cf62b18 100644
+--- a/player/command.c
++++ b/player/command.c
+@@ -8474,7 +8474,9 @@ void mp_option_run_callback(struct MPContext *mpctx, struct mp_option_callback *
+             queue_seek(mpctx, MPSEEK_RELATIVE, 0.0, MPSEEK_EXACT, 0);
+     }
+ 
+-    if (opt_ptr == &opts->vo->android_surface_size || opt_ptr == &opts->vo->d3d11_composition_size) {
++    if (opt_ptr == &opts->vo->android_surface_size ||
++        opt_ptr == &opts->vo->openharmony_surface_size ||
++        opt_ptr == &opts->vo->d3d11_composition_size) {
+         if (mpctx->video_out)
+             vo_control(mpctx->video_out, VOCTRL_EXTERNAL_RESIZE, NULL);
+     }
+diff --git a/video/out/gpu/context.c b/video/out/gpu/context.c
+index 60c0641..6c2dd02 100644
+--- a/video/out/gpu/context.c
++++ b/video/out/gpu/context.c
+@@ -42,6 +42,7 @@ extern const struct ra_ctx_fns ra_ctx_wgl;
+ extern const struct ra_ctx_fns ra_ctx_angle;
+ extern const struct ra_ctx_fns ra_ctx_dxgl;
+ extern const struct ra_ctx_fns ra_ctx_android;
++extern const struct ra_ctx_fns ra_ctx_openharmony;
+ 
+ /* Vulkan */
+ extern const struct ra_ctx_fns ra_ctx_vulkan_wayland;
+@@ -102,6 +103,9 @@ static const struct ra_ctx_fns *const contexts[] = {
+ #if HAVE_EGL_ANDROID
+     &ra_ctx_android,
+ #endif
++#if HAVE_EGL_OPENHARMONY
++    &ra_ctx_openharmony,
++#endif
+ #if HAVE_EGL_ANGLE_WIN32
+     &ra_ctx_angle,
+ #endif
+diff --git a/video/out/vo.h b/video/out/vo.h
+index f24918d..aa921a4 100644
+--- a/video/out/vo.h
++++ b/video/out/vo.h
+@@ -470,6 +470,8 @@ struct vo {
+         struct vo_w32_state *w32;
+         struct vo_wayland_state *wl;
+         struct vo_android_state *android;
++        // OpenHarmony 平台状态（ohos 补丁引入；见 video/out/openharmony_common.h）
++        struct vo_openharmony_state *openharmony;
+         struct vo_drm_state *drm;
+     };
+     struct mp_hwdec_devices *hwdec_devs;

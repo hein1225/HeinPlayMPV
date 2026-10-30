@@ -1,0 +1,30 @@
+# 构建输出与工具链缓存（不入库）
+dist/
+*.7z
+*.tar.gz
+
+# 本地工具链 / 第三方缓存（体积大）
+thirdparty/cache/
+.caches/
+
+# mpv 交叉编译与 Android 构建的中间产物目录
+build/**/build/
+build/**/prefix/
+build/**/deps/
+build/**/.gradle/
+build/android/mpv-android/deps/
+build/android/mpv-android/prefix/
+build/android/mpv-android/app/.cxx/
+build/android/mpv-android/.gradle/
+sources/**/build/
+sources/**/arm64-v8a-build*/
+
+# Python 工具与缓存
+__pycache__/
+*.pyc
+
+# mpv-android 的本地 meson wheel 工具链（由 mpv-android buildscripts 自动下载）
+build/android/mpv-android-tools/
+
+# 参考工程：上游工程的 clone（含嵌套 .git），不入库
+build/ohos/reference/

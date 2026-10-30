@@ -1,0 +1,141 @@
+cmake_minimum_required(VERSION 3.5.0)
+set(CMAKE_CXX_STANDARD 20)
+project(mpv_wrapper)
+
+cmake_minimum_required(VERSION 3.15)
+
+# ------------------------------------------------------------------------------
+function(download_and_verify url sha locationForArchive)
+  # Check if the archive exists.
+  if(EXISTS "${locationForArchive}")
+    file(SHA256 "${locationForArchive}" ARCHIVE_SHA)
+
+    # If SHA256 doesn't match, delete the archive to download again.
+    if(NOT sha STREQUAL ARCHIVE_SHA)
+      file(REMOVE "${locationForArchive}")
+      message(STATUS "MD5 mismatch. File deleted.")
+    endif()
+  endif()
+
+  # Download the archive if it doesn't exist.
+  if(NOT EXISTS "${locationForArchive}")
+    message(STATUS "Downloading archive from ${url}...")
+    file(DOWNLOAD "${url}" "${locationForArchive}")
+    message(STATUS "Downloaded archive to ${locationForArchive}.")
+
+    # Verify SHA256 of the newly downloaded file.
+    file(SHA256 "${locationForArchive}" ARCHIVE_SHA)
+
+    if(sha STREQUAL ARCHIVE_SHA)
+      message(STATUS "${locationForArchive} Verification successful.")
+    else()
+      message(FATAL_ERROR "${locationForArchive} Integrity check failed, please try to re-build project again.")
+    endif()
+  endif()
+endfunction()
+
+function(check_directory_exists_and_not_empty dir result_var)
+  # Check if the directory exists
+  if(EXISTS "${dir}")
+    # Check if the directory is not empty
+    file(GLOB dir_contents "${dir}/*")
+
+    if(dir_contents)
+      set(${result_var} TRUE PARENT_SCOPE)
+    else()
+      set(${result_var} FALSE PARENT_SCOPE)
+      message(STATUS "Directory ${dir} exists but is empty!")
+    endif()
+  else()
+    set(${result_var} FALSE PARENT_SCOPE)
+    message(STATUS "Directory ${dir} does not exist!")
+  endif()
+endfunction()
+
+# libmpv archive containing the pre-built shared libraries.
+set(LIBMPV "libmpv_aarch64.zip")
+
+# Download URL & SHA256 hash of the libmpv archive.
+set(LIBMPV_URL "https://github.com/mpv-ohos/libmpv-ohos-build/releases/download/20260715/${LIBMPV}")
+set(LIBMPV_SHA "ac8b176dc4c86f4772d62ff530762ec187c3c46383bf2d476870d17dad806e5b")
+
+# Download location of the libmpv archive.
+set(LIBMPV_ARCHIVE "${CMAKE_CURRENT_SOURCE_DIR}/${LIBMPV}")
+set(LIBMPV_SRC "${CMAKE_CURRENT_SOURCE_DIR}/../../../libs/arm64-v8a/")
+
+download_and_verify(
+  ${LIBMPV_URL}
+  ${LIBMPV_SHA}
+  ${LIBMPV_ARCHIVE}
+)
+
+check_directory_exists_and_not_empty(${LIBMPV_SRC} LIBMPV_SRC_VALID)
+
+# Extract the libmpv archive.
+if(NOT LIBMPV_SRC_VALID)
+  message(STATUS "Extracting ${LIBMPV}...")
+  file(MAKE_DIRECTORY "${LIBMPV_SRC}")
+  execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E tar -xf "${LIBMPV_ARCHIVE}"
+    WORKING_DIRECTORY "${LIBMPV_SRC}"
+  )
+endif()
+# ------------------------------------------------------------------------------
+
+include_directories(third_party/mpv/include third_party/simdjson)
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 🔴 2026-10-06 实验（分诊用）：直接使用【官方预编译】的 mpv_wrapper + aki
+#
+# 背景：真机日志显示 `import libmpv from 'libmpv_wrapper.so'` 恒为 undefined，
+#   动态 import 能加载成功但取不到 NativePlayer（导出对象为空）。
+#   逐项对比官方源码后确认：napi_init.cpp / cpp 目录 / build-profile.json5 /
+#   wrapper 的 NEEDED / mpv 符号需求 **全部一致**，官方 har 却能正常工作。
+#   唯一残留差异是 libaki_jsbind.so 的 md5 不同（官方 fa747e40 / 我们 385d3cff），
+#   而 wrapper 正是通过 aki 的 JSBind::BindSymbols 注册导出。
+#
+# 本实验：绕过本地 CMake 编译，整套使用官方 har 里的
+#   libmpv_wrapper.so + libaki_jsbind.so，以判定问题出在
+#   「我们编译出的 wrapper/aki」还是「更上层的加载环境」。
+#
+# 回滚：本文件备份在 /tmp/CMakeLists.txt.bak
+# ═══════════════════════════════════════════════════════════════════════════
+set(PREBUILT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../libs/prebuilt-official")
+set(PREBUILT_WRAPPER "${PREBUILT_DIR}/libmpv_wrapper.so")
+set(PREBUILT_AKI "${PREBUILT_DIR}/libaki_jsbind.so")
+
+if(EXISTS "${PREBUILT_WRAPPER}" AND EXISTS "${PREBUILT_AKI}")
+    message(STATUS ">>> 实验模式：使用官方预编译 wrapper + aki")
+
+    add_library(mpv_wrapper SHARED IMPORTED)
+    set_target_properties(mpv_wrapper PROPERTIES
+        IMPORTED_LOCATION "${PREBUILT_WRAPPER}"
+        IMPORTED_NO_SONAME TRUE)
+
+    add_library(aki_jsbind SHARED IMPORTED)
+    set_target_properties(aki_jsbind PROPERTIES
+        IMPORTED_LOCATION "${PREBUILT_AKI}"
+        IMPORTED_NO_SONAME TRUE)
+else()
+    message(STATUS ">>> 常规模式：本地编译 mpv_wrapper")
+    add_subdirectory(third_party/aki)
+
+    add_library(mpv_wrapper SHARED
+        napi_init.cpp
+        src/log.cpp
+        src/log.h
+        src/event.cpp
+        src/property.cpp
+        src/main.cpp
+        src/globals.h
+        src/node.cpp
+        src/node.h
+        third_party/simdjson/simdjson.cpp)
+
+    set(LIBS
+        libace_napi.z.so
+        libhilog_ndk.z.so
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../../libs/arm64-v8a/libmpv.so)
+
+    target_link_libraries(mpv_wrapper PUBLIC ${LIBS} aki_jsbind)
+endif()

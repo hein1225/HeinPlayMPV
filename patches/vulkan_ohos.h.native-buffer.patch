@@ -1,0 +1,25 @@
+diff --git a/include/vulkan/vulkan_ohos.h b/include/vulkan/vulkan_ohos.h
+index 9c41b1d..02bafde 100644
+--- a/include/vulkan/vulkan_ohos.h
++++ b/include/vulkan/vulkan_ohos.h
+@@ -24,6 +24,20 @@ extern "C" {
+ struct OH_NativeBuffer;
+ #define VK_OHOS_EXTERNAL_MEMORY_SPEC_VERSION 1
+ #define VK_OHOS_EXTERNAL_MEMORY_EXTENSION_NAME "VK_OHOS_external_memory"
++
++// 🔴 HeinPlay 2026-10-07 补充：鸿蒙 OHCodec 零拷贝硬解所需的
++//    VK_OHOS_native_buffer 扩展名定义。
++//    官方 Vulkan-Headers（OHOS SDK sysroot 内）的 vulkan_ohos.h 里
++//    VK_OHOS_NATIVE_BUFFER_EXTENSION_NAME 是独立定义的：
++//      #define VK_OHOS_NATIVE_BUFFER_EXTENSION_NAME "VK_OHOS_native_buffer"
++//    但 libplacebo 自带这份精简头文件漏了它，导致 mpv 侧
++//    hwdec_ohcodec_pl.c 的 has_extension(vk, VK_OHOS_NATIVE_BUFFER_EXTENSION_NAME)
++//    检查永远失败。此处补齐，使设备创建时能请求该扩展。
++#ifndef VK_OHOS_NATIVE_BUFFER_EXTENSION_NAME
++#define VK_OHOS_native_buffer 1
++#define VK_OHOS_NATIVE_BUFFER_SPEC_VERSION 1
++#define VK_OHOS_NATIVE_BUFFER_EXTENSION_NAME "VK_OHOS_native_buffer"
++#endif
+ typedef struct VkNativeBufferUsageOHOS {
+     VkStructureType    sType;
+     void*              pNext;

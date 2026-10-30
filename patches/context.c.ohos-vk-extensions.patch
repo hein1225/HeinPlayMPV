@@ -1,0 +1,71 @@
+diff --git a/src/vulkan/context.c b/src/vulkan/context.c
+index 168b420d..de10c9f7 100644
+--- a/src/vulkan/context.c
++++ b/src/vulkan/context.c
+@@ -20,6 +20,17 @@
+ #include "utils.h"
+ #include "gpu.h"
+ 
++// 🔴 HeinPlay 2026-10-07：鸿蒙 OHCodec 零拷贝硬解需要 VK_OHOS_native_buffer /
++//    VK_OHOS_external_memory 两个设备扩展（下文 vk_device_extensions 表中追加）。
++//    这两个宏只在 vulkan_ohos.h 定义，而它不在默认 include 链里，必须显式包含，
++//    否则新增的 #ifdef 分支会被静默跳过、扩展仍不启用。
++//    头文件可能不存在（非 OHOS 平台 / 上游 Vulkan-Headers 未带），故 __has_include 保护。
++#if defined(__has_include)
++#  if __has_include(<vulkan/vulkan_ohos.h>)
++#    include <vulkan/vulkan_ohos.h>
++#  endif
++#endif
++
+ #ifdef PL_HAVE_VK_PROC_ADDR
+ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(
+     VkInstance                                  instance,
+@@ -179,6 +190,33 @@ static const struct vk_ext vk_device_extensions[] = {
+             PL_VK_DEV_FUN(AcquireFullScreenExclusiveModeEXT),
+             {0}
+         },
++#endif
++#ifdef VK_OHOS_native_buffer
++    }, {
++        // 🔴 HeinPlay 2026-10-07：鸿蒙 OHCodec 零拷贝硬解必需的设备扩展。
++        //    背景：mpv 的 ohcodec hwdec 在 Vulkan interop 入口用
++        //    has_extension(pl_vulkan, ...) 检查这两个扩展是否已启用
++        //    （hwdec_ohcodec_pl.c:436-437 与 L656-658）。但 libplacebo 的
++        //    vk_device_extensions 表从来不列它们（只列 KHR/EXT 通用外部内存），
++        //    mpv 也只在 instance 层请求了 VK_OHOS_surface（context_ohos.c:58）。
++        //    于是设备创建时它们从未启用 → has_extension 恒 false → Vulkan interop
++        //    直接 return false；GL interop 在 vo=gpu-next(Vulkan) 下 ra_is_gl 亦 false
++        //    → 两条路径全失败 → ohcodec init 返回 -1（"requires compatible GL or Vulkan"）
++        //    → mpv 静默退软解，VO 恒为 yuv420p。真机实证：7 次 hwdec=ohcodec 全落空。
++        //    注：这两个扩展无 libplacebo 需加载的函数指针（相关 vk 调用由 mpv hwdec
++        //    代码直接经 vkGetDeviceProcAddr 取），故 .funs 留空。
++        .name = VK_OHOS_NATIVE_BUFFER_EXTENSION_NAME,
++        .funs = (const struct vk_fun[]) {
++            {0}
++        },
++#endif
++#ifdef VK_OHOS_external_memory
++    }, {
++        // 同上：VK_OHOS_external_memory（鸿蒙 NativeBuffer 外部内存导入）。
++        .name = VK_OHOS_EXTERNAL_MEMORY_EXTENSION_NAME,
++        .funs = (const struct vk_fun[]) {
++            {0}
++        },
+ #endif
+     }, {
+         .name = VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME,
+@@ -229,6 +267,14 @@ const char * const pl_vulkan_recommended_extensions[] = {
+ #endif
+ #ifdef VK_EXT_full_screen_exclusive
+     VK_EXT_FULL_SCREEN_EXCLUSIVE_EXTENSION_NAME,
++#endif
++#ifdef VK_OHOS_native_buffer
++    // 🔴 HeinPlay 2026-10-07：必须与下方 vk_device_extensions 表保持同步
++    //    （static_assert 强制校验）。鸿蒙 OHCodec 零拷贝硬解依赖这两个扩展。
++    VK_OHOS_NATIVE_BUFFER_EXTENSION_NAME,
++#endif
++#ifdef VK_OHOS_external_memory
++    VK_OHOS_EXTERNAL_MEMORY_EXTENSION_NAME,
+ #endif
+     VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME,
+     VK_KHR_FORMAT_FEATURE_FLAGS_2_EXTENSION_NAME,
